@@ -8,6 +8,7 @@ from CLEAN.utils import *
 import torch.nn as nn
 import argparse
 from CLEAN.distance_map import get_dist_map
+from tqdm import tqdm
 
 
 def parse():
@@ -19,7 +20,11 @@ def parse():
     parser.add_argument('-d', '--hidden_dim', type=int, default=512)
     parser.add_argument('-o', '--out_dim', type=int, default=128)
     parser.add_argument('--adaptive_rate', type=int, default=100)
+    parser.add_argument('--seed', type=int, default=1234)
     parser.add_argument('--verbose', type=bool, default=False)
+    parser.add_argument('--precision', choices=['fp32', 'bf16', 'fp16'], default='fp32')
+    parser.add_argument('--no-progress', dest='progress', action='store_false')
+    parser.set_defaults(progress=True)
     args = parser.parse_args()
     return args
 
@@ -36,21 +41,32 @@ def get_dataloader(dist_map, id_ec, ec_id, args):
 
 
 def train(model, args, epoch, train_loader,
-          optimizer, device, dtype, criterion):
+          optimizer, device, dtype, criterion, scaler, amp_enabled, amp_dtype):
     model.train()
     total_loss = 0.
     start_time = time.time()
 
-    for batch, data in enumerate(train_loader):
+    loader = train_loader
+    if args.progress:
+        loader = tqdm(train_loader, desc=f'epoch {epoch}', leave=False)
+
+    for batch, data in enumerate(loader):
         optimizer.zero_grad()
         anchor, positive, negative = data
-        anchor_out = model(anchor.to(device=device, dtype=dtype))
-        positive_out = model(positive.to(device=device, dtype=dtype))
-        negative_out = model(negative.to(device=device, dtype=dtype))
 
-        loss = criterion(anchor_out, positive_out, negative_out)
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=amp_dtype):
+            anchor_out = model(anchor.to(device=device, dtype=dtype))
+            positive_out = model(positive.to(device=device, dtype=dtype))
+            negative_out = model(negative.to(device=device, dtype=dtype))
+            loss = criterion(anchor_out, positive_out, negative_out)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
         if args.verbose:
@@ -66,7 +82,8 @@ def train(model, args, epoch, train_loader,
 
 
 def main():
-    seed_everything()
+    args = parse()
+    seed_everything(args.seed)
     ensure_dirs('./data/model')
     args = parse()
     torch.backends.cudnn.benchmark = True
@@ -76,10 +93,24 @@ def main():
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
     dtype = torch.float32
+    amp_enabled = False
+    amp_dtype = torch.float16
+    scaler = None
+    if args.precision != 'fp32':
+        if not use_cuda:
+            raise RuntimeError(f'--precision {args.precision} requires CUDA')
+        amp_enabled = True
+        if args.precision == 'bf16':
+            if hasattr(torch.cuda, 'is_bf16_supported') and not torch.cuda.is_bf16_supported():
+                raise RuntimeError('--precision bf16 requested but CUDA bf16 is not supported')
+            amp_dtype = torch.bfloat16
+        else:
+            amp_dtype = torch.float16
+            scaler = torch.cuda.amp.GradScaler()
     lr, epochs = args.learning_rate, args.epoch
     model_name = args.model_name
     print('==> device used:', device, '| dtype used: ',
-          dtype, "\n==> args:", args)
+          dtype, '| precision:', args.precision, "\n==> args:", args)
     #======================== ESM embedding  ===================#
     # loading ESM embedding for dist map
  
@@ -97,7 +128,10 @@ def main():
     print("The number of unique EC numbers: ", len(dist_map.keys()))
     #======================== training =======-=================#
     # training
-    for epoch in range(1, epochs + 1):
+    epoch_iter = range(1, epochs + 1)
+    if args.progress:
+        epoch_iter = tqdm(epoch_iter, desc='training epochs')
+    for epoch in epoch_iter:
         if epoch % args.adaptive_rate == 0 and epoch != epochs + 1:
             optimizer = torch.optim.Adam(
                 model.parameters(), lr=lr, betas=(0.9, 0.999))
@@ -115,7 +149,8 @@ def main():
         # -------------------------------------------------------------------- #
         epoch_start_time = time.time()
         train_loss = train(model, args, epoch, train_loader,
-                           optimizer, device, dtype, criterion)
+                           optimizer, device, dtype, criterion,
+                           scaler, amp_enabled, amp_dtype)
         # only save the current best model near the end of training
         if (train_loss < best_loss and epoch > 0.8*epochs):
             torch.save(model.state_dict(), './data/model/' + model_name + '.pth')
@@ -128,8 +163,11 @@ def main():
               f'training loss {train_loss:6.4f}')
         print('-' * 75)
     # remove tmp save weights
-    os.remove('./data/model/' + model_name + '.pth')
-    os.remove('./data/model/' + model_name + '_' + str(epoch) + '.pth')
+    for tmp_model in [
+            './data/model/' + model_name + '.pth',
+            './data/model/' + model_name + '_' + str(epoch) + '.pth']:
+        if os.path.exists(tmp_model):
+            os.remove(tmp_model)
     # save final weights
     torch.save(model.state_dict(), './data/model/' + model_name + '.pth')
 
