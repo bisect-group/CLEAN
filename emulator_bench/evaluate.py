@@ -7,8 +7,11 @@ import pandas as pd
 import torch
 
 from .results import (
+    compact_evaluation_summary,
     compute_care_metrics,
+    compute_supplemental_classification_metrics,
     compute_supplemental_ranking_metrics,
+    parse_clean_maxsep_csv,
     write_care_ranked_csv,
 )
 from .utils import (
@@ -138,6 +141,7 @@ def evaluate_split(
         native_prefix = f"results/emulator_bench/{metadata['run_slug']}/seed{seed}/{eval_split}"
         ensure_dir(APP_DIR / Path(native_prefix).parent)
         write_max_sep_choices(eval_df, native_prefix)
+        native_maxsep_csv = APP_DIR / f"{native_prefix}_maxsep.csv"
         pred_label = get_pred_labels(native_prefix, pred_type="_maxsep")
         pred_probs = get_pred_probs(native_prefix, pred_type="_maxsep")
         true_label, all_label = get_true_labels(f"./data/{eval_data}")
@@ -146,6 +150,8 @@ def evaluate_split(
     care_csv = result_root / f"{eval_split}_results_df.csv"
     clean_eval_csv = APP_DIR / "data" / f"{eval_data}.csv"
     care_df = write_care_ranked_csv(eval_df, clean_eval_csv, care_csv)
+    parsed_maxsep_csv = result_root / f"{eval_split}_maxsep_df.csv"
+    parse_clean_maxsep_csv(native_maxsep_csv).to_csv(parsed_maxsep_csv, index=False)
 
     if care_results_root:
         external_csv = external_care_ranked_csv(
@@ -167,9 +173,13 @@ def evaluate_split(
             "exact_match_accuracy": float(native_metric_values[4]),
         },
         "care_task1": compute_care_metrics(care_df),
-        "supplemental": compute_supplemental_ranking_metrics(care_df),
+        "supplemental": {
+            "classification": compute_supplemental_classification_metrics(true_label, pred_label),
+            "ranking": compute_supplemental_ranking_metrics(care_df),
+        },
         "artifacts": {
-            "native_maxsep_csv": str(APP_DIR / f"{native_prefix}_maxsep.csv"),
+            "native_maxsep_csv": str(native_maxsep_csv),
+            "parsed_maxsep_csv": str(parsed_maxsep_csv),
             "care_ranked_csv": str(care_csv),
             "external_care_ranked_csv": str(external_csv) if external_csv else None,
         },
@@ -221,7 +231,14 @@ def main() -> None:
         )
         for eval_split in eval_splits
     ]
-    write_json(result_root / "evaluation_summary.json", all_metrics)
+    write_json(
+        result_root / "evaluation_summary.json",
+        compact_evaluation_summary(
+            all_metrics,
+            checkpoint=str(checkpoint),
+            model_name=model_name,
+        ),
+    )
 
 
 if __name__ == "__main__":
