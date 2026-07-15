@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
-from tqdm import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 from .utils import (
     APP_DATA_DIR,
@@ -127,7 +133,7 @@ def load_clean_records(
     df = df[df["Sequence Length"] > 0].copy()
 
     exploded = []
-    for row in tqdm(
+    for row in progress(
         df.to_dict("records"),
         total=len(df),
         desc=f"{split_name} labels",

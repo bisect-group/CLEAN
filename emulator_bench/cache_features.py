@@ -6,7 +6,13 @@ import shutil
 from pathlib import Path
 
 import torch
-from tqdm import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 from .dataset_adapter import load_manifest, prepare_split_group, select_split_groups
 from .utils import (
@@ -108,7 +114,7 @@ def extract_esm_features(
 
     batch_converter = alphabet.get_batch_converter(esm_truncation_length)
     batches = list(batch_by_tokens(items, toks_per_batch))
-    for batch in tqdm(batches, desc="ESM batches", unit="batch"):
+    for batch in progress(batches, desc="ESM batches", unit="batch"):
         labels = [item[0] for item in batch]
         sequences = [item[1] for item in batch]
         output_paths = [item[2] for item in batch]
@@ -175,7 +181,7 @@ def materialize_app_esm_links(metadata: dict, cache_root: Path) -> None:
     app_esm_root = APP_DATA_DIR / "esm_data"
     for split_name in ("train", "val", "test"):
         manifest = load_manifest(metadata, split_name)
-        for row in tqdm(
+        for row in progress(
             manifest.itertuples(index=False),
             total=len(manifest),
             desc=f"{metadata['split_group']} {split_name} cache links",
